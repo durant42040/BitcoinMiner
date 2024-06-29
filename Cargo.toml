@@ -4,8 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+axum = { version = "0.7.5", features = ["ws"] }
+futures-util = "0.3.30"
+hex = "0.4.3"
 hex-literal = "0.4.1"
 reqwest = { version = "0.12.5", features = ["json"] }
 serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.118"
 sha2 = "0.10.8"
 tokio = { version = "1.38.0", features = ["full"] }
+tokio-tungstenite = { version = "0.23.1", features = ["__rustls-tls", "native-tls"] }
+tungstenite = "0.23.0"
+websockets = "0.3.0"
