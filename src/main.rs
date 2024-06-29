@@ -3,26 +3,35 @@ use sha2::{Digest, Sha256};
 use serde::Deserialize;
 use serde_json::from_str;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio::time::{interval, Duration};
 use futures_util::{StreamExt, SinkExt};
-use tokio::{sync::Mutex, time::{interval, Duration}};
+use tokio::sync::Mutex;
 use hex;
 
-
-#[derive(Debug, Deserialize)]
 struct Block {
-    blockIndex: u64,
-    hash: String,
-    time: u64,
-    version: u64,
-    bits: u64,
-    nonce: u64,
-    mrklRoot: String,
+    version: String,
+    prev_block: String,
+    merkle_root: String,
+    time: String,
+    bits: String,
+    nonce: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct BlockData {
+    blockIndex: u32,
+    hash: String,
+    time: u32,
+    version: u32,
+    bits: u32,
+    nonce: u32,
+    mrklRoot: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WSData {
     op: String,
-    x: Option<Block>
+    x: Option<BlockData>
 }
 
 
@@ -42,11 +51,14 @@ async fn ws_connect() -> Result<(), Box<dyn Error>> {
 
     println!("Connected to WebSocket");
 
+    // subscribe to new blocks
     let (mut write, read) = ws_stream.split();
     write.send(Message::Text(r#"{"op":"blocks_sub"}"#.into())).await.unwrap();
 
+
+    // ping every 60 seconds to keep connection alive
     tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(60));
+        let mut interval = interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
             write.send(Message::Text(r#"{"op":"ping"}"#.into())).await.unwrap();
@@ -58,17 +70,18 @@ async fn ws_connect() -> Result<(), Box<dyn Error>> {
             Ok(msg) => {
                 match msg {
                     Message::Text(text) => {
-                        let data: BlockData = from_str(&text).unwrap();
+                        let data: WSData = from_str(&text).unwrap();
                         if data.op == "block" {
-                            println!("new block received");
+                            println!("New block received");
                             println!("{:?}", data.x.unwrap());
                         } else {
                             println!("{:?}", data.op);
                         }
                     }
-                    _ => {
-                        println!("Received unknown message");
+                    Message::Close(_) => {
+                        println!("Connection closed");
                     }
+                    _ => {}
                 }
             }
             Err(e) => {
@@ -90,23 +103,59 @@ fn mine() {
 
 
     let block_header = format!("{}{}{}{}{}{}", version, prev_block, merkle_root, time, bits, nonce);
-    println!("Block Header: {:?}", block_header);
+    // println!("Block Header: {:?}", block_header);
 
     let block_hash = double_hash(block_header);
-    println!("Block Hash: {:?}", block_hash);
+    // println!("Block Hash: {:?}", block_hash);
+}
+
+fn increment(x: &mut i32) {
+    *x += 1;
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>>{
-    tokio::spawn(async {
+    let block = Arc::new(Mutex::new(Block {
+        version: "".to_string(),
+        prev_block: "".to_string(),
+        merkle_root: "".to_string(),
+        time: "".to_string(),
+        bits: "".to_string(),
+        nonce: "".to_string(),
+    }));
+     
+    let block_clone = Arc::clone(&block);
+
+    tokio::spawn(async move {
+        let block = &*block_clone.lock().await;
         ws_connect().await.unwrap();
-    }).await?;
+    });
 
-    tokio::spawn(async {
-        mine();
-    }).await?;
-
+    tokio::spawn(async move {
+        loop {
+            mine();
+        }
+    }).await.unwrap();
+    
     Ok(())
 }
 
-// { blockIndex: 849966, hash: "00000000000000000001c72bddcbdb95d42f8fb7be60b60dca6fb89f1f03c0ce", time: 1719669616, version: 1073676288, bits: 386096421, nonce: 1897988852, mrklRoot: "68a9aed40d36a400a0e3d8232b96f5204bc1c3ecec0afd529082f10e47a4a3b8" }
+// let x = Arc::new(Mutex::new(0));
+
+//     let x_clone = Arc::clone(&x);
+//     tokio::spawn(async move {
+//         // let block = &*block_clone.lock().await;
+//         // ws_connect().await.unwrap();
+//         let x = &mut *x_clone.lock().await;
+//         increment(x);
+//         println!("x: {:?}", x);
+//     });
+
+//     let x_clone = Arc::clone(&x);
+//     tokio::spawn(async move {
+//         let x = *x_clone.lock().await;
+//         loop {
+//             // mine();
+//             println!("mine x: {:?}", x);
+//         }
+//     }).await.unwrap();
