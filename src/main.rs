@@ -1,37 +1,47 @@
-use std::{error::Error, sync::Arc};
+use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use serde::Deserialize;
 use serde_json::from_str;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async, tungstenite::{protocol::Message, error::Error}};
 use tokio::time::{interval, Duration};
 use futures_util::{StreamExt, SinkExt};
 use tokio::sync::Mutex;
 use hex;
 
+
+#[derive(Debug, Deserialize)]
 struct Block {
-    version: String,
-    prev_block: String,
-    merkle_root: String,
-    time: String,
-    bits: String,
-    nonce: String,
+    hash: Option<String>,
+    prev_block: Option<String>,
+    time: Option<u32>,
+    version: Option<u32>,
+    bits: Option<u32>,
+    nonce: Option<u32>,
+    #[serde(rename = "mrklRoot")]
+    merkle_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct BlockData {
-    blockIndex: u32,
-    hash: String,
-    time: u32,
-    version: u32,
-    bits: u32,
-    nonce: u32,
-    mrklRoot: String,
+    op: String,
+    x: Option<Block>
 }
 
-#[derive(Debug, Deserialize)]
-struct WSData {
-    op: String,
-    x: Option<BlockData>
+fn compare_hash(hash : String, target: String) -> bool {
+    println!("hash: {:?}", hash);
+    println!("target: {:?}", target);
+
+    let hash = hex::decode(hash).unwrap();
+    let target = hex::decode(target).unwrap();
+
+    for i in 0..32 {
+        if hash[i] > target[i] {
+            return false;
+        } else if hash[i] < target[i] {
+            return true;
+        }
+    }
+    return true;
 }
 
 
@@ -39,13 +49,89 @@ fn double_hash(data : String) -> String {
     hex::encode(Sha256::digest(&Sha256::digest(&hex::decode(data).unwrap())))
 }
 
-fn to_little_endian(data: &str) -> String {
+fn to_little_endian(data: String) -> String {
     let bytes = hex::decode(data).expect("Decoding failed");
     let little_endian_bytes = bytes.into_iter().rev().collect::<Vec<_>>();
     hex::encode(little_endian_bytes)
 }
 
-async fn ws_connect() -> Result<(), Box<dyn Error>> {
+
+fn mine(block : &Block) {
+    let version = to_little_endian(format!("{:x}", block.version.unwrap()));
+    let prev_block =  to_little_endian(block.prev_block.clone().unwrap());
+    let merkle_root =  to_little_endian(block.merkle_root.clone().unwrap());
+    let time =  to_little_endian(format!("{:x}", block.time.unwrap()));
+    let bits =  to_little_endian(format!("{:x}", block.bits.unwrap()));
+    let nonce =  to_little_endian(format!("{:x}", 3226147965u32));
+
+    let target = format!("{:x}", block.bits.unwrap());
+    let (exponent, coefficient) = target.split_at(2);
+    let exponent = u64::from_str_radix(exponent, 16).unwrap();
+
+    let target = format!("{}{}{}", "0".repeat(18), coefficient, "0".repeat((2*exponent-6).try_into().unwrap()));
+
+
+
+    let block_header = format!("{}{}{}{}{}{}", version, prev_block, merkle_root, time, bits, nonce);
+
+    let block_hash = double_hash(block_header);
+
+    if compare_hash(to_little_endian(block_hash.clone()), target) {
+        println!("Block mined!");
+        println!("Block hash: {:?}", block_hash);
+        println!("Nonce: {:?}", nonce);
+    } 
+}
+
+async fn handle_message(message: Result<Message, Error>, block_clone: Arc<Mutex<Block>>) {
+    match message {
+        Ok(msg) => {
+            match msg {
+                Message::Text(text) => {
+                    let data: BlockData = from_str(&text).unwrap();
+                    if data.op == "block" {
+                        println!("New block received");
+                        let new_block = data.x.unwrap();
+                        println!("new_block: {:?}", new_block);
+                        let mut block = block_clone.lock().await;
+                        *block = Block {
+                            version: new_block.version,
+                            prev_block: block.hash.clone(),
+                            hash: new_block.hash,
+                            merkle_root: new_block.merkle_root,
+                            time: new_block.time,
+                            bits: new_block.bits,
+                            nonce: new_block.nonce,
+                        };
+                    } else {
+                        println!("{}", data.op);
+                    }
+                }
+                Message::Close(_) => {
+                    println!("Connection closed");
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            println!("Error receiving message: {:?}", e);
+        }
+    }
+}
+
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Arc::new(Mutex::new(Block {
+        hash: None,
+        prev_block: None,
+        time: None,
+        version: None,
+        bits: None,
+        nonce: None,
+        merkle_root: None,
+    }));
+
     let (ws_stream, _) = connect_async("wss://ws.blockchain.info/inv")
         .await?;
 
@@ -57,7 +143,7 @@ async fn ws_connect() -> Result<(), Box<dyn Error>> {
 
 
     // ping every 60 seconds to keep connection alive
-    tokio::spawn(async move {
+    let ping = tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
@@ -65,97 +151,40 @@ async fn ws_connect() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    read.for_each(|message| async {
-        match message {
-            Ok(msg) => {
-                match msg {
-                    Message::Text(text) => {
-                        let data: WSData = from_str(&text).unwrap();
-                        if data.op == "block" {
-                            println!("New block received");
-                            println!("{:?}", data.x.unwrap());
-                        } else {
-                            println!("{:?}", data.op);
-                        }
-                    }
-                    Message::Close(_) => {
-                        println!("Connection closed");
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) => {
-                println!("Error receiving message: {:?}", e);
-            }
-        }
-    }).await;
 
-    Ok(())
-}
-
-fn mine() {
-    let version = "01000000";
-    let prev_block =  "0000000000000000000000000000000000000000000000000000000000000000";
-    let merkle_root =  "3BA3EDFD7A7B12B27AC72C3E67768F617FC81BC3888A51323A9FB8AA4B1E5E4A";
-    let time =  "29AB5F49";
-    let bits =  "FFFF001D";
-    let nonce =  "1DAC2B7C";
-
-
-    let block_header = format!("{}{}{}{}{}{}", version, prev_block, merkle_root, time, bits, nonce);
-    // println!("Block Header: {:?}", block_header);
-
-    let block_hash = double_hash(block_header);
-    // println!("Block Hash: {:?}", block_hash);
-}
-
-fn increment(x: &mut i32) {
-    *x += 1;
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>>{
-    let block = Arc::new(Mutex::new(Block {
-        version: "".to_string(),
-        prev_block: "".to_string(),
-        merkle_root: "".to_string(),
-        time: "".to_string(),
-        bits: "".to_string(),
-        nonce: "".to_string(),
-    }));
-     
     let block_clone = Arc::clone(&block);
-
-    tokio::spawn(async move {
-        let block = &*block_clone.lock().await;
-        ws_connect().await.unwrap();
+    let block_listener = tokio::spawn(async move {
+        read.for_each(|message| async {
+            let block_clone = Arc::clone(&block_clone);
+            handle_message(message, block_clone).await;
+        }).await;
     });
 
-    tokio::spawn(async move {
+
+    let block_clone = Arc::clone(&block);
+    let block_miner = tokio::spawn(async move {
         loop {
-            mine();
+            let block = block_clone.lock().await;
+            if block.version.is_some() {
+                println!("Begin mining...");
+                break;
+            }
         }
-    }).await.unwrap();
-    
+        loop {
+            let block = block_clone.lock().await;
+            mine(&block);
+        }
+    });
+
+    tokio::try_join!(ping, block_listener, block_miner)?;
+
     Ok(())
 }
 
-// let x = Arc::new(Mutex::new(0));
-
-//     let x_clone = Arc::clone(&x);
-//     tokio::spawn(async move {
-//         // let block = &*block_clone.lock().await;
-//         // ws_connect().await.unwrap();
-//         let x = &mut *x_clone.lock().await;
-//         increment(x);
-//         println!("x: {:?}", x);
-//     });
-
-//     let x_clone = Arc::clone(&x);
-//     tokio::spawn(async move {
-//         let x = *x_clone.lock().await;
-//         loop {
-//             // mine();
-//             println!("mine x: {:?}", x);
-//         }
-//     }).await.unwrap();
+// BlockData { blockIndex: 850080, 
+// hash: "000000000000000000011c34ec3b3f9cabd4254ef45882c12ed929e3570b5b50", 
+// time: 1719734992, 
+// version: 536911872, 
+// bits: 386096421, 
+// nonce: 1137605160, 
+// mrklRoot: "0443824439444b0d9d6ca03cc4ef3bdb1c7ed123f7a1cfc5d3c035d1d7e92e91" }
