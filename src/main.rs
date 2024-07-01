@@ -3,9 +3,10 @@ use sha2::{Digest, Sha256};
 use serde::Deserialize;
 use serde_json::from_str;
 use tokio_tungstenite::{connect_async, tungstenite::{protocol::Message, error::Error}};
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, Duration, sleep};
 use futures_util::{StreamExt, SinkExt};
 use tokio::sync::Mutex;
+use rand::Rng;
 use hex;
 
 
@@ -16,7 +17,6 @@ struct Block {
     time: Option<u32>,
     version: Option<u32>,
     bits: Option<u32>,
-    nonce: Option<u32>,
     #[serde(rename = "mrklRoot")]
     merkle_root: Option<String>,
 }
@@ -28,9 +28,6 @@ struct BlockData {
 }
 
 fn compare_hash(hash : String, target: String) -> bool {
-    println!("hash: {:?}", hash);
-    println!("target: {:?}", target);
-
     let hash = hex::decode(hash).unwrap();
     let target = hex::decode(target).unwrap();
 
@@ -55,6 +52,11 @@ fn to_little_endian(data: String) -> String {
     hex::encode(little_endian_bytes)
 }
 
+fn rand_nonce() -> String {
+    let mut rng = rand::thread_rng();
+    let num: u32 = rng.gen();
+    format!("{:08x}", num)
+}
 
 fn mine(block : &Block) {
     let version = to_little_endian(format!("{:x}", block.version.unwrap()));
@@ -62,7 +64,8 @@ fn mine(block : &Block) {
     let merkle_root =  to_little_endian(block.merkle_root.clone().unwrap());
     let time =  to_little_endian(format!("{:x}", block.time.unwrap()));
     let bits =  to_little_endian(format!("{:x}", block.bits.unwrap()));
-    let nonce =  to_little_endian(format!("{:x}", 3226147965u32));
+
+    let nonce = rand_nonce();
 
     let target = format!("{:x}", block.bits.unwrap());
     let (exponent, coefficient) = target.split_at(2);
@@ -76,10 +79,12 @@ fn mine(block : &Block) {
 
     let block_hash = double_hash(block_header);
 
+    println!("hash: {}, nonce: {}", block_hash, nonce);
+
     if compare_hash(to_little_endian(block_hash.clone()), target) {
         println!("Block mined!");
-        println!("Block hash: {:?}", block_hash);
-        println!("Nonce: {:?}", nonce);
+        println!("Block hash: {}", block_hash);
+        println!("Nonce: {}", nonce);
     } 
 }
 
@@ -101,11 +106,8 @@ async fn handle_message(message: Result<Message, Error>, block_clone: Arc<Mutex<
                             merkle_root: new_block.merkle_root,
                             time: new_block.time,
                             bits: new_block.bits,
-                            nonce: new_block.nonce,
                         };
-                    } else {
-                        println!("{}", data.op);
-                    }
+                    } 
                 }
                 Message::Close(_) => {
                     println!("Connection closed");
@@ -122,13 +124,15 @@ async fn handle_message(message: Result<Message, Error>, block_clone: Arc<Mutex<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let latest_hash = reqwest::get("https://blockchain.info/q/latesthash").await?.text().await?;
+    println!("Latest hash: {}", latest_hash);
+    
     let block = Arc::new(Mutex::new(Block {
-        hash: None,
+        hash: Some(latest_hash),
         prev_block: None,
         time: None,
         version: None,
         bits: None,
-        nonce: None,
         merkle_root: None,
     }));
 
@@ -160,7 +164,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }).await;
     });
 
-
     let block_clone = Arc::clone(&block);
     let block_miner = tokio::spawn(async move {
         loop {
@@ -170,21 +173,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
         }
+        let mut x = 0;
+        
         loop {
             let block = block_clone.lock().await;
+            x += 1;
             mine(&block);
+            println!("Attempt: {}", x);
         }
     });
+
+    
 
     tokio::try_join!(ping, block_listener, block_miner)?;
 
     Ok(())
 }
-
-// BlockData { blockIndex: 850080, 
-// hash: "000000000000000000011c34ec3b3f9cabd4254ef45882c12ed929e3570b5b50", 
-// time: 1719734992, 
-// version: 536911872, 
-// bits: 386096421, 
-// nonce: 1137605160, 
-// mrklRoot: "0443824439444b0d9d6ca03cc4ef3bdb1c7ed123f7a1cfc5d3c035d1d7e92e91" }
